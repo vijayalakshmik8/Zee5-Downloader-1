@@ -1,56 +1,49 @@
-## Zee5 Downloader
-If you find any bugs, report at @TroJanzSupport
+# Zee5 Downloader project — safe Termux setup
 
-**My Features**:
+## Important limitation
+This patched build does **not** extract Zee5 page links or bypass DRM. The previous
+Zee5-specific code rewrote DRM-labelled URLs; that behavior has been removed.
+This build only handles direct, non-DRM media URLs that yt-dlp can access and that
+you are authorized to download. Cookies are optional authentication for supported
+non-DRM sources; they do not decrypt DRM streams.
 
-👉 Upload as file/video from any NON-DRM Zee5 link
+## Termux installation
 
-👉 Permanent thumbnail support.
-
-### Installation
-
-
-#### Deploy to Heroku
-
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy/)
-
-#### Run in your VPS
-
-* Install requirements
-
-```sh
-sudo apt install python3-pip
-sudo apt install ffmpeg
+```bash
+pkg update && pkg upgrade -y
+pkg install python ffmpeg git -y
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-* Create config.py appropriately (Refer Configs section)
+## Configure
 
-* Run the app
+Set your Telegram credentials in Termux before starting the bot:
 
-```sh
-git clone https://github.com/TroJanzHEX/Zee5-Downloader
-cd Zee5-Downloader
-pip3 install -r requirements.txt
-python3 bot.py
+```bash
+export APP_ID="YOUR_API_ID"
+export API_HASH="YOUR_API_HASH"
+export TG_BOT_TOKEN="YOUR_BOT_TOKEN"
 ```
 
-## Configs
+Optional settings:
 
-* TG_BOT_TOKEN  - Get bot token from @BotFather
-* APP_ID        - From my.telegram.org (or @UseTGXBot)
-* API_HASH      - From my.telegram.org (or @UseTGXBot)
-* DB_URI        - PostgreSQL DB URL
+```bash
+export UPDATE_CHANNEL=""
+export AUTH_USERS=""
+export COOKIES_FILE="/path/to/cookies.txt"
+```
 
-## Commands
+`COOKIES_FILE` must point to a Netscape-format cookies file for a service/account
+you are authorized to use. Do not publish or share your cookies file.
 
-* /start             - Check if bot is alive
-* /help              - To know how the bot works
-* /upgrade           - Nothing much here
-* /showthumb         - Shows saved thumbnail
-* /delthumb          - Clear saved thumbnail
+## Run
 
+```bash
+python bot.py
+```
 
-## Credits, and Thanks to Beloved Developers ;
-
-* [SpEcHlDe](https://telegram.dog/SpEcHlDe) 
-* [Dan Tès](https://telegram.dog/haskell)
+## Notes
+- FFmpeg is required for MP3 conversion and audio/video merging.
+- Local SQLite is used by default; PostgreSQL can be configured with `DATABASE_URL`.
+- Do not use this bot to download DRM-protected or unauthorized content.

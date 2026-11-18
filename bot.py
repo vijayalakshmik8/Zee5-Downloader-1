@@ -1,32 +1,39 @@
 import logging
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+import os
+
+import pyrogram
+from config import Config
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
-import os
 
-if bool(os.environ.get("WEBHOOK", False)):
-    from sample_config import Config
-else:
-    from config import Config
+if __name__ == "__main__":
+    missing = []
+    if not Config.TG_BOT_TOKEN:
+        missing.append("TG_BOT_TOKEN")
+    if not Config.APP_ID:
+        missing.append("APP_ID")
+    if not Config.API_HASH:
+        missing.append("API_HASH")
 
-import pyrogram
+    if missing:
+        raise SystemExit(
+            "Missing environment variables: " + ", ".join(missing)
+            + ". See .env.example / README.md."
+        )
 
+    os.makedirs(Config.DOWNLOAD_LOCATION, exist_ok=True)
 
-
-if __name__ == "__main__" :
-    if not os.path.isdir(Config.DOWNLOAD_LOCATION):
-        os.makedirs(Config.DOWNLOAD_LOCATION)
-    plugins = dict(
-        root="plugins"
-    )
     app = pyrogram.Client(
         "Zee5",
         bot_token=Config.TG_BOT_TOKEN,
         api_id=Config.APP_ID,
         api_hash=Config.API_HASH,
-        plugins=plugins
+        plugins={"root": "plugins"},
     )
-    Config.AUTH_USERS.add(680815375)
     app.run()
