@@ -1,453 +1,213 @@
+import asyncio
+import html
 import logging
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-logging.getLogger("pyrogram").setLevel(logging.WARNING)
-
 import os
 import re
-import json
-import math
-import time
 import shutil
-import random
-import ffmpeg
-import asyncio
-import requests
+import time
+from urllib.parse import urlparse
 
-if bool(os.environ.get("WEBHOOK", False)):
-    from sample_config import Config
-else:
-    from config import Config
-
-from script import script
-from database.database import *
-
+import yt_dlp
 from pyrogram import Client, filters
-from pyrogram.types import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import UserNotParticipant, UserBannedInChannel
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+from config import Config
+
+logger = logging.getLogger(__name__)
+USER_JOBS = {}
+
+ALLOWED_MEDIA_EXTENSIONS = {
+    ".mp4", ".m4v", ".mov", ".webm", ".m3u8", ".mpd",
+    ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav",
+}
 
 
-from hachoir.metadata import extractMetadata
-from hachoir.parser import createParser
-from datetime import datetime
-from PIL import Image
-
-from plugins.helpers import(
-    progress_for_pyrogram,
-    humanbytes,
-    headers,
-    take_screen_shot,
-    DownLoadFile
-)
-
+def _ydl_base_options():
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "outtmpl": os.path.join(Config.DOWNLOAD_LOCATION, "%(title).150B_%(id)s.%(ext)s"),
+    }
+    cookie_path = getattr(Config, "COOKIES_FILE", "")
+    if cookie_path and os.path.isfile(cookie_path):
+        options["cookiefile"] = cookie_path
+    return options
 
 
-@Client.on_message(filters.private & filters.regex(pattern=".*http.*"))
-async def zee5_capture(bot, update):
-    if update.from_user.id in Config.BANNED_USERS:
-        await bot.delete_messages(
-            chat_id=update.chat.id,
-            message_ids=update.message_id,
-            revoke=True
+def _is_direct_media_url(url):
+    parsed = urlparse(url)
+    return parsed.scheme in ("http", "https") and os.path.splitext(parsed.path.lower())[1] in ALLOWED_MEDIA_EXTENSIONS
+
+
+@Client.on_message(filters.private & filters.text & filters.regex(r"^https?://"))
+async def capture_media(client, message):
+    url = message.text.strip()
+
+    # This repository's old Zee5 extractor rewrote DRM-labelled URLs.
+    # Do not recreate or extend that DRM circumvention behavior.
+    host = (urlparse(url).hostname or "").lower()
+    if host == "zee5.com" or host.endswith(".zee5.com"):
+        await message.reply_text(
+            "This safe build does not extract Zee5 page links or bypass DRM. "
+            "Use an official download option, or send a direct non-DRM media URL "
+            "that you are authorized to download."
         )
         return
-    if Config.UPDATE_CHANNEL:
-        try:
-            user = await bot.get_chat_member(Config.UPDATE_CHANNEL, update.chat.id)
-            if user.status == "kicked":
-               await update.reply_text("🤭 Sorry Dude, You are **B A N N E D**.")
-               return
-        except UserNotParticipant:
-            #await update.reply_text(f"Join @{update_channel} To Use Me")
-            await update.reply_text(
-                text="**Join My Updates Channel to use me & Enjoy the Free Service**",
-                reply_markup=InlineKeyboardMarkup([
-                    [ InlineKeyboardButton(text="Join Our Updates Channel", url=f"https://telegram.me/{Config.UPDATE_CHANNEL}")]
-                ])
-            )
-            return 
-        except Exception as error:
-            print(error)
-            await update.reply_text("Something wrong contact support group")
-            return
-    logger.info(update.from_user.id)
-    
-    if "zee5" in update.text:
-        try:
-            w = update.text 
-            req1 = requests.get("https://useraction.zee5.com/tokennd").json()
-            rgx = re.findall("([0-9]?\w+)", w)[-3:]
-            li = { "url":"zee5vodnd.akamaized.net", "token":"https://gwapi.zee5.com/content/details/" }
-            req2 = requests.get("https://useraction.zee5.com/token/platform_tokens.php?platform_name=web_app").json()["token"]
-            headers["X-Access-Token"] = req2
-            req3 = requests.get("https://useraction.zee5.com/token").json()    
-            if "movies" in w:
-                    r1 = requests.get(li["token"] + "-".join(rgx),
-                                                headers=headers, 
-                                                params={"translation":"en", "country":"IN"}).json()
-                    g1 = (r1["hls"][0].replace("drm", "hls") + req1["video_token"])
-                    file_name = r1["title"]
-                    url = "https://" + li["url"] + g1
-            elif "tvshows" or "originals" in w:
-                    r2 = requests.get(li["token"] + "-".join(rgx), 
-                                                headers=headers, 
-                                                params={"translation":"en", "country":"IN"}).json()
-                    g2 = (r2["hls"][0].replace("drm", "hls"))
-                    if "netst" in g2:
-                        file_name = r2["title"]
-                        url = g2 + req3["video_token"]               
-                    else:
-                        file_name = r2["title"]
-                        url = "https://" + li["url"] + g2 + req1["video_token"]
-                    
-            logger.info(url)
-        except:
-            await update.reply_text("There's some issue with your URL 😕", quote=True)
-            return
-            
-    else:
-        await update.reply_text("I can download from Zee5 links only! Use @UrlUploader_Xbot for other links 😇", quote=True)
+
+    if not _is_direct_media_url(url):
+        await message.reply_text(
+            "Please send a direct media URL ending in a supported media extension "
+            "(for example .mp4, .mp3, .m3u8 or .webm). DRM-protected streams are not supported."
+        )
         return
-    
+
+    status = await message.reply_text("🔎 Checking available media formats...")
     try:
-        zee5_capture.url = url    
-        
-        command_to_exec = [
-            "youtube-dl",
-            "--no-warnings",
-            "--youtube-skip-dash-manifest",
-            "-j",
-            url,
-            "--geo-bypass-country",
-            "IN"
-        ]
-        process = await asyncio.create_subprocess_exec(
-            *command_to_exec,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        def inspect():
+            with yt_dlp.YoutubeDL(_ydl_base_options()) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        info = await asyncio.to_thread(inspect)
+        if not info:
+            raise RuntimeError("No media information was returned.")
+
+        formats = info.get("formats") or []
+        buttons = []
+        seen = set()
+
+        for item in reversed(formats):
+            if item.get("vcodec") == "none":
+                continue
+            fmt_id = str(item.get("format_id", ""))
+            if not fmt_id or len(fmt_id.encode("utf-8")) > 35 or fmt_id in seen:
+                continue
+            seen.add(fmt_id)
+
+            height = item.get("height")
+            note = item.get("format_note") or (f"{height}p" if height else item.get("format", "Video"))
+            size = item.get("filesize") or item.get("filesize_approx")
+            size_text = f" · {size / (1024 * 1024):.1f} MB" if size else ""
+            label = f"🎬 {note}{size_text}"
+            buttons.append(InlineKeyboardButton(label[:60], callback_data=f"video|{fmt_id}"))
+            if len(buttons) >= 8:
+                break
+
+        keyboard_rows = [[button] for button in buttons]
+        keyboard_rows.append([InlineKeyboardButton("🎵 MP3 Audio", callback_data="audio|mp3")])
+
+        if not keyboard_rows:
+            raise RuntimeError("No downloadable video formats were found.")
+
+        USER_JOBS[message.from_user.id] = {
+            "url": url,
+            "title": info.get("title") or "Media",
+        }
+        await status.edit_text(
+            f"Choose a format for: <b>{html.escape(info.get('title') or 'Media')}</b>",
+            reply_markup=InlineKeyboardMarkup(keyboard_rows),
+            parse_mode="html",
         )
-        stdout, stderr = await process.communicate()
-        e_response = stderr.decode().strip()
-        t_response = stdout.decode().strip()
+    except Exception as exc:
+        logger.exception("Media inspection failed")
+        await status.edit_text(f"❌ Could not inspect this media: {html.escape(str(exc))}")
 
-        if e_response:
-            logger.info(e_response)
 
-        if t_response:
-            x_reponse = t_response
-            if "\n" in x_reponse:
-                x_reponse, _ = x_reponse.split("\n")
-            response_json = json.loads(x_reponse)
-            save_ytdl_json_path = Config.DOWNLOAD_LOCATION + \
-                "/" + str(update.from_user.id) + ".json"
-            with open(save_ytdl_json_path, "w", encoding="utf8") as outfile:
-                json.dump(response_json, outfile, ensure_ascii=False)
-            inline_keyboard = []
-            duration = None
-            if "duration" in response_json:
-                duration = response_json["duration"]
-            if "formats" in response_json:
-                for formats in response_json["formats"]:
-                    format_id = formats.get("format_id")
-                    format_string = formats.get("format_note")
-                    if format_string is None:
-                        format_string = formats.get("format")
-                    format_ext = formats.get("ext")
-                    approx_file_size = ""
-                    if "filesize" in formats:
-                        approx_file_size = humanbytes(formats["filesize"])
-                    cb_string_video = "{}|{}|{}".format(
-                        "video", format_id, format_ext)
-                    cb_string_file = "{}|{}|{}".format(
-                        "file", format_id, format_ext)
-                    if format_string is not None and not "audio only" in format_string:
-                        ikeyboard = [
-                            InlineKeyboardButton(
-                                "🎞 (" + format_string + ") " + approx_file_size + " ",
-                                callback_data=(cb_string_video).encode("UTF-8")
-                            ),
-                            InlineKeyboardButton(
-                                "📁 FILE " + format_ext + " " + approx_file_size + " ",
-                                callback_data=(cb_string_file).encode("UTF-8")
-                            )
-                        ]                           
-                        inline_keyboard.append(ikeyboard)
-                        
-            inline_keyboard.append([
-                InlineKeyboardButton(
-                    "✖️ CLOSE ✖️",
-                     callback_data=(
-                        "closeformat").encode("UTF-8")
-                )
-             ])
+async def zee5_execute(client, query):
+    user_id = query.from_user.id
+    job = USER_JOBS.get(user_id)
+    if not job:
+        await query.answer("Link expired. Send the media URL again.", show_alert=True)
+        return
 
-            reply_markup = InlineKeyboardMarkup(inline_keyboard)
-            thumbnail = Config.DEF_THUMB_NAIL_VID_S
-            thumbnail_image = Config.DEF_THUMB_NAIL_VID_S
-            if "thumbnail" in response_json:
-               if response_json["thumbnail"] is not None:
-                   thumbnail = response_json["thumbnail"]
-                   thumbnail_image = response_json["thumbnail"]
-            thumb_image_path = DownLoadFile(
-                thumbnail_image,
-                Config.DOWNLOAD_LOCATION + "/" +
-                str(update.from_user.id) + ".jpg",
-                Config.CHUNK_SIZE,
-                None,  # bot,
-                script.DOWNLOAD_START,
-                update.message_id,
-                update.chat.id
-            )   
- 
-            await bot.send_message(
-                chat_id=update.chat.id,
-                text=script.FORMAT_SELECTION.format(thumbnail),
-                reply_markup=reply_markup,
+    try:
+        mode, selected = query.data.split("|", 1)
+    except ValueError:
+        await query.answer("Invalid selection.", show_alert=True)
+        return
+
+    await query.answer()
+    status = await query.message.edit_text("⏬ Downloading media...")
+    output_dir = os.path.join(Config.DOWNLOAD_LOCATION, str(user_id))
+    os.makedirs(output_dir, exist_ok=True)
+    filename = None
+
+    try:
+        options = _ydl_base_options()
+        options["outtmpl"] = os.path.join(output_dir, "%(title).150B_%(id)s.%(ext)s")
+
+        if mode == "audio":
+            options.update({
+                "format": "bestaudio/best",
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }],
+            })
+        elif mode == "video":
+            options.update({
+                "format": f"{selected}+bestaudio/{selected}/best",
+                "merge_output_format": "mp4",
+            })
+        else:
+            raise RuntimeError("Unsupported media type.")
+
+        def download():
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(job["url"], download=True)
+                if not info:
+                    raise RuntimeError("Download did not return media information.")
+                prepared = ydl.prepare_filename(info)
+                if mode == "audio":
+                    prepared = os.path.splitext(prepared)[0] + ".mp3"
+                elif not os.path.exists(prepared):
+                    mp4_candidate = os.path.splitext(prepared)[0] + ".mp4"
+                    if os.path.exists(mp4_candidate):
+                        prepared = mp4_candidate
+                return prepared, info
+
+        filename, info = await asyncio.to_thread(download)
+        if not filename or not os.path.isfile(filename):
+            raise RuntimeError("Downloaded output file was not found.")
+
+        size = os.path.getsize(filename)
+        if size > Config.TG_MAX_FILE_SIZE:
+            raise RuntimeError(
+                f"File is {size / (1024 * 1024):.1f} MB, above the configured Telegram upload limit."
+            )
+
+        await status.edit_text("📤 Uploading to Telegram...")
+        title = info.get("title") or job.get("title") or "Media"
+
+        if mode == "audio":
+            await client.send_audio(
+                chat_id=query.message.chat.id,
+                audio=filename,
+                title=title[:64],
+                caption=f"🎵 {html.escape(title)}",
                 parse_mode="html",
-                reply_to_message_id=update.message_id
             )
         else:
-            await update.reply_text("There's some issue with your URL 😕 Or may be DRM protected!", quote=True)
-            return
-    except:
-        await update.reply_text("Couldn't download your video!", quote=True)
-        logger.info('format send error')
-        return
-             
-async def zee5_execute(bot, update):
-  
-    try:
-        cb_data = update.data
-        tg_send_type, youtube_dl_format, youtube_dl_ext = cb_data.split("|")
-        
-        thumb_image_path = Config.DOWNLOAD_LOCATION + \
-            "/" + str(update.from_user.id) + ".jpg"
-
-        save_ytdl_json_path = Config.DOWNLOAD_LOCATION + \
-            "/" + str(update.from_user.id) + ".json"
-        try:
-            with open(save_ytdl_json_path, "r", encoding="utf8") as f:
-                response_json = json.load(f)
-        except (FileNotFoundError) as e:
-            await bot.delete_messages(
-                chat_id=update.message.chat.id,
-                message_ids=update.message.message_id,
-                revoke=True
+            await client.send_video(
+                chat_id=query.message.chat.id,
+                video=filename,
+                caption=f"🎬 {html.escape(title)}",
+                parse_mode="html",
+                supports_streaming=True,
             )
-            return False
-        
-        youtube_dl_url = zee5_capture.url
-        
-        linksplit = update.message.reply_to_message.text.split("/")
-        videoname = linksplit[+5]
-        logger.info(videoname)
-        
-        custom_file_name = videoname + ".mp4"
 
-        await bot.edit_message_text(
-            text=script.DOWNLOAD_START,
-            chat_id=update.message.chat.id,
-            message_id=update.message.message_id
-        )
-        description = script.CUSTOM_CAPTION_UL_FILE.format(newname=custom_file_name)
-
-        tmp_directory_for_each_user = Config.DOWNLOAD_LOCATION + "/" + str(update.from_user.id)
-        if not os.path.isdir(tmp_directory_for_each_user):
-            os.makedirs(tmp_directory_for_each_user)
-        download_directory = tmp_directory_for_each_user + "/" + custom_file_name
-        command_to_exec = []
-        
-        minus_f_format = youtube_dl_format + "+bestaudio"
-        command_to_exec = [
-            "youtube-dl",
-            "-c",
-            "--max-filesize", str(Config.TG_MAX_FILE_SIZE),
-            "-f", minus_f_format,
-            "--hls-prefer-ffmpeg", youtube_dl_url,
-            "-o", download_directory
-        ]                  
-        command_to_exec.append("--no-warnings")
-        command_to_exec.append("--geo-bypass-country")
-        command_to_exec.append("IN")
-        
-        start = datetime.now()
-        process = await asyncio.create_subprocess_exec(
-            *command_to_exec,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-        e_response = stderr.decode().strip()
-        t_response = stdout.decode().strip()
-
-        if os.path.isfile(download_directory):
-            logger.info("no issues")
-        else:
-            logger.info("issues found, passing to sub process")
-            command_to_exec.clear()
-            minus_f_format = youtube_dl_format
-            command_to_exec = [
-                "youtube-dl",
-                "-c",
-                "--max-filesize", str(Config.TG_MAX_FILE_SIZE),
-                "-f", minus_f_format,
-                "--hls-prefer-ffmpeg", youtube_dl_url,
-                "-o", download_directory
-            ]                  
-            command_to_exec.append("--no-warnings")
-            command_to_exec.append("--geo-bypass-country")
-            command_to_exec.append("IN")
-        
-            start = datetime.now()
-            process = await asyncio.create_subprocess_exec(
-                *command_to_exec,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-            e_response = stderr.decode().strip()
-            t_response = stdout.decode().strip()
-
-        ad_string_to_replace = "please report this issue on https://yt-dl.org/bug . Make sure you are using the latest version; see  https://yt-dl.org/update  on how to update. Be sure to call youtube-dl with the --verbose flag and include its complete output."
-        if e_response and ad_string_to_replace in e_response:
-            error_message = e_response.replace(ad_string_to_replace, "")
-            await bot.edit_message_text(
-                chat_id=update.message.chat.id,
-                message_id=update.message.message_id,
-                text=error_message
-            )
-            return False
-        if t_response:
-            os.remove(save_ytdl_json_path)
-            end_one = datetime.now()
-            time_taken_for_download = (end_one -start).seconds
-            file_size = Config.TG_MAX_FILE_SIZE + 1
+        await status.delete()
+    except Exception as exc:
+        logger.exception("Media download/upload failed")
+        await status.edit_text(f"❌ Failed: {html.escape(str(exc))}")
+    finally:
+        if filename and os.path.isfile(filename):
             try:
-                file_size = os.stat(download_directory).st_size
-            except FileNotFoundError as exc:
-                download_directory = os.path.splitext(download_directory)[0] + "." + "mp4"
-                file_size = os.stat(download_directory).st_size
-            if file_size > Config.TG_MAX_FILE_SIZE:
-                await bot.edit_message_text(
-                    chat_id=update.message.chat.id,
-                    text=script.RCHD_TG_API_LIMIT.format(time_taken_for_download, humanbytes(file_size)),
-                    message_id=update.message.message_id
-                )
-            else:
-                await bot.edit_message_text(
-                    text=script.UPLOAD_START,
-                    chat_id=update.message.chat.id,
-                    message_id=update.message.message_id
-                )
-
-                # get the correct width, height, and duration for videos greater than 10MB
-                width = 0
-                height = 0
-                duration = 0
-                if tg_send_type != "file":
-                    metadata = extractMetadata(createParser(download_directory))
-                    if metadata is not None:
-                        if metadata.has("duration"):
-                            duration = metadata.get('duration').seconds            
-                # get the correct width, height, and duration for videos greater than 10MB
-                
-                if not os.path.exists(thumb_image_path):
-                    mes = await thumb(update.from_user.id)
-                    if mes != None:
-                        m = await bot.get_messages(update.chat.id, mes.msg_id)
-                        await m.download(file_name=thumb_image_path)
-                        thumb_image_path = thumb_image_path
-                    else:
-                        try:
-                            thumb_image_path = await take_screen_shot(
-                                download_directory,
-                                os.path.dirname(download_directory),
-                                random.randint(
-                                    0,
-                                    duration - 1
-                                )
-                            )
-                        except:
-                            thumb_image_path = None
-                            pass  
-                else:
-                    width = 0
-                    height = 0
-                    metadata = extractMetadata(createParser(thumb_image_path))
-                    if metadata.has("width"):
-                        width = metadata.get("width")
-                    if metadata.has("height"):
-                        height = metadata.get("height")
-                    if tg_send_type == "vm":
-                        height = width               
-                    Image.open(thumb_image_path).convert(
-                        "RGB").save(thumb_image_path)
-                    img = Image.open(thumb_image_path)
-                    img.thumbnail((90, 90))
-                    if tg_send_type == "file":
-                        img.resize((320, height))
-                    else:
-                        img.resize((90, height))
-                    img.save(thumb_image_path, "JPEG")
-  
-                start_time = time.time()
-
-                if tg_send_type == "file":
-                    await bot.send_document(
-                        chat_id=update.message.chat.id,
-                        document=download_directory,
-                        thumb=thumb_image_path,
-                        caption=description,
-                        parse_mode="HTML",
-                        # reply_markup=reply_markup,
-                        reply_to_message_id=update.message.reply_to_message.message_id,
-                        progress=progress_for_pyrogram,
-                        progress_args=(
-                            script.UPLOAD_START,
-                            update.message,
-                            start_time
-                        )
-                    )
-                elif tg_send_type == "video":
-                    await bot.send_video(
-                        chat_id=update.message.chat.id,
-                        video=download_directory,
-                        caption=description,
-                        parse_mode="HTML",
-                        duration=duration,
-                        width=width,
-                        height=height,
-                        supports_streaming=True,
-                        # reply_markup=reply_markup,
-                        thumb=thumb_image_path,
-                        reply_to_message_id=update.message.reply_to_message.message_id,
-                        progress=progress_for_pyrogram,
-                        progress_args=(
-                            script.UPLOAD_START,
-                            update.message,
-                            start_time
-                        )
-                    )
-                else:
-                    logger.info("Did this happen? :\\")
-
-                try:
-                    shutil.rmtree(tmp_directory_for_each_user)
-                except:
-                    pass
-                try:
-                    os.remove(thumb_image_path)
-                except:
-                    pass
-
-                await bot.edit_message_text(
-                    text=script.AFTER_SUCCESSFUL_UPLOAD_MSG_WITH_TS,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(text="🙌🏻 SHARE ME 🙌🏻", url="tg://msg?text=%2A%2AHai%20%E2%9D%A4%EF%B8%8F%2C%2A%2A%20%0A__Today%20i%20just%20found%20out%20an%20intresting%20and%20Powerful__%20%2A%2AZee5%20Downloader%20Bot%2A%2A%20__for%20Free%F0%9F%A5%B0.__%20%20%0A%2A%2ABot%20Link%20%3A%20%40Zee5_DownloaderBot%2A%2A%20%F0%9F%94%A5")]]),
-                    chat_id=update.message.chat.id,
-                    message_id=update.message.message_id,
-                    disable_web_page_preview=True
-                )               
-    except:
-        await update.reply_text("Couldn't download your video!", quote=True)
-        logger.info('error in process')
+                os.remove(filename)
+            except OSError:
+                pass
+        try:
+            shutil.rmtree(output_dir, ignore_errors=True)
+        except OSError:
+            pass
